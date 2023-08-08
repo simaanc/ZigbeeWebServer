@@ -7,16 +7,23 @@ This repository contains a Python application that captures data from a serial p
 Before you start, ensure you have the following prerequisites installed:
 
 - Python 3.x
-- Flask (`pip install Flask`)
-- pyftdi (`pip install pyftdi`)
-- dateutil (`pip install python-dateutil`)
-- pytz (`pip install pytz`)
+- Flask
+- python-dateutil
+- pytz
+- pyftdi
+
+## Installing pyftdi
+
+For setting up `pyftdi`, please follow the installation instructions based on your operating system by visiting the official documentation:
+
+[pyftdi Installation Instructions](https://eblot.github.io/pyftdi/installation.html)
 
 ## Getting Started
 
 1. **Clone the Repository**
 
    Clone this repository to your local machine or download the ZIP archive and extract it.
+
 
 2. **Install Dependencies**
 
