@@ -1,0 +1,4 @@
+Flask
+pyftdi
+python-dateutil
+pytz
