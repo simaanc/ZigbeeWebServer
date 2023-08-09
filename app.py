@@ -4,86 +4,127 @@ import datetime
 import time
 import csv
 import sqlite3
+import configparser
 import os
 import pytz
 import threading
 import dateutil.parser
 from pathlib import Path
 
+from getpass import getpass
+import mysql.connector
+from mysql.connector import Error
+
 app = Flask(__name__)
 
 # Paths and configuration
 source_path = Path(__file__).resolve()
 source_dir = source_path.parent
-DATA_FILE = 'data.db'
-DEVICES_FILE = 'devices.db'
-CSV_FILE = 'data.csv'
+config = configparser.ConfigParser()
+configLocation = str(source_dir) + "/configfile.ini"
 
 # Open a serial port on the second FTDI device interface (IF/2) @ 115200 baud
 port = pyftdi.serialext.serial_for_url('ftdi://ftdi:232:/1', baudrate=115200)
 
-
 current_value = "0"
 
-# MQTT client setup
+# Client setup
 running = False
 
-# Create SQLite database if it doesn't exist
-if not os.path.isfile(DATA_FILE):
-    conn = sqlite3.connect(DATA_FILE)
-    cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE sensor_data (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        node TEXT,
-        date_time TEXT,
-        value TEXT
-    )""")
-    conn.commit()
-    conn.close()
 
-# Create SQLite database if it doesn't exist
-if not os.path.isfile(DEVICES_FILE):
-    conn = sqlite3.connect(DEVICES_FILE)
-    cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE devices_list (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        node TEXT,
-        unique (node)
-    )""")
-    conn.commit()
-    conn.close()
+def write_file():
+    with open(configLocation, "w") as configfile:
+        config.write(configfile)
 
-# Create new data file
-if not os.path.isfile(CSV_FILE):
-    with open('data.csv', 'a', newline='') as file:
-        writer = csv.writer(file)
-        field = ["time", "node", "value"]
-        writer.writerow(field)
+# Configuration setup
+config = configparser.ConfigParser()
+if not os.path.exists(configLocation):
+    config["MySQLConfig"] = {
+        "host": "localhost",
+        "user": "username",
+        "password": "password",
+        "port": "3306",
+    }
+    write_file()
+else:
+    config.read(configLocation)
+    print(config.sections())
+
+sqlhost = config.get("MySQLConfig", "host")
+sqluser = config.get("MySQLConfig", "user")
+sqlpass = config.get("MySQLConfig", "password")
+sqlport = config.get("MySQLConfig", "port")
+
+try:
+    with mysql.connector.connect(
+        host=sqlhost,
+        user=sqluser,
+        password=sqlpass,
+        port=sqlport,
+    ) as connection:
+        create_db_query = "CREATE DATABASE IF NOT EXISTS zigbee_data"
+        with connection.cursor() as cursor:
+            cursor.execute(create_db_query)
+        
+        # Select the database
+        connection.database = "zigbee_data"
+        
+        # Create 'sensor_data' table if it doesn't exist
+        create_sensor_data_table_query = """
+        CREATE TABLE IF NOT EXISTS sensor_data (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            node VARCHAR(255),
+            date_time DATETIME,
+            value TEXT
+        )
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(create_sensor_data_table_query)
+        
+        # Create 'devices_list' table if it doesn't exist
+        create_devices_list_table_query = """
+        CREATE TABLE IF NOT EXISTS devices_list (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            node VARCHAR(255) UNIQUE
+        )
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(create_devices_list_table_query)
+except Error as e:
+    print(e)
 
 def write_devices_file(node):
-    db_conn = sqlite3.connect(DEVICES_FILE)
-    db_cursor = db_conn.cursor()
-    db_cursor.execute(
-        "INSERT OR IGNORE INTO devices_list VALUES(:id, :node)",
-        {'id': None, 'node': str(node)}
-    )
-    db_conn.commit()
-    db_cursor.close()
-    db_conn.close()
+    try:
+        with mysql.connector.connect(
+            host=sqlhost,
+            user=sqluser,
+            password=sqlpass,
+            database="zigbee_data",
+            port=sqlport,
+        ) as connection:
+            insert_query = "INSERT IGNORE INTO devices_list (node) VALUES (%s)"
+            with connection.cursor() as cursor:
+                cursor.execute(insert_query, (str(node),))
+                connection.commit()
+    except Error as e:
+        print(e)
 
 def write_data_file(node, date_time, value):
-    # Convert date_time to Unix timestamp
-    timestamp = int(dateutil.parser.parse(date_time).timestamp())
+    try:
+        with mysql.connector.connect(
+            host=sqlhost,
+            user=sqluser,
+            password=sqlpass,
+            database="zigbee_data",
+            port=sqlport,
+        ) as connection:
+            insert_query = "INSERT INTO sensor_data (node, date_time, value) VALUES (%s, %s, %s)"
+            with connection.cursor() as cursor:
+                cursor.execute(insert_query, (str(node), date_time, str(value)))
+                connection.commit()
+    except Error as e:
+        print(e)
 
-    db_conn = sqlite3.connect(DATA_FILE)
-    db_cursor = db_conn.cursor()
-    db_cursor.execute(
-        "INSERT INTO sensor_data VALUES(:id, :node, :date_time, :value)",
-        {'id': None, 'node': str(node), 'date_time': timestamp, 'value': str(value)}
-    )
-    db_conn.commit()
-    db_cursor.close()
-    db_conn.close()
 
 def serial_thread():
     global running
@@ -136,20 +177,12 @@ def serial_thread():
             # Convert data to ASCII
             data_ascii = bytes.fromhex(data_hex).decode('utf-8', errors='replace')
 
-            # Print the interpreted values
-            # print(f"Raw Hex: {hex_representation}")
-            # print(f"Start Delimiter: {start_delimiter}")
-            # print(f"Length: {length}")
-            # print(f"Frame Type: {frame_type}")
-            # print(f"64-bit Source Address: {source_address_64}")
-            # print(f"16-bit Source Address: {source_address_16}")
-            # print(f"Receive Options: {receive_options}")
-            # print(f"Data (Hex): {data_hex}")
-            # print(f"Data (ASCII): {data_ascii}")
-            # print(f"Checksum: {checksum_hex}")
-
             t = datetime.datetime.now(tz=pytz.utc)
             date_time_str = t.isoformat()
+
+            # Filter out non-ASCII characters from data_ascii
+            data_ascii = ''.join(char for char in data_ascii if char.isascii())
+
             write_data_file(
                 source_address_64,
                 date_time_str,
@@ -190,17 +223,25 @@ def index(device=None, action=None):
 
 @app.route('/devices', methods=['GET'])
 def get_devices():
-    conn = sqlite3.connect(DEVICES_FILE)
-    cursor = conn.cursor()
+    try:
+        with mysql.connector.connect(
+            host=sqlhost,
+            user=sqluser,
+            password=sqlpass,
+            database="zigbee_data",
+            port=sqlport,
+        ) as connection:
+            select_query = "SELECT id, node FROM devices_list"
+            with connection.cursor() as cursor:
+                cursor.execute(select_query)
+                device_rows = cursor.fetchall()
 
-    cursor.execute('SELECT id, node FROM devices_list')
-    device_rows = cursor.fetchall()
+                devices = [{'id': row[0], 'node': row[1]} for row in device_rows]
 
-    devices = [{'id': row[0], 'node': row[1]} for row in device_rows]
-
-    conn.close()
-
-    return jsonify(devices)
+                return jsonify(devices)
+    except Error as e:
+        print(e)
+        return jsonify([])
 
 
 @app.route('/data', methods=["GET", "POST"])
@@ -211,46 +252,51 @@ def data():
     print('Received Request - Range:', range_param, 'Device:', device_param)  # Add this line for debugging
 
     if device_param:
-        conn = sqlite3.connect(DATA_FILE)
-        cursor = conn.cursor()
+        try:
+            with mysql.connector.connect(
+                host=sqlhost,
+                user=sqluser,
+                password=sqlpass,
+                database="zigbee_data",
+                port=sqlport,
+            ) as connection:
+                cursor = connection.cursor()
 
-        if range_param:
-            range_seconds = 0
-            if range_param == '1h':
-                range_seconds = 3600
-            elif range_param == '24h':
-                range_seconds = 24 * 3600
-            elif range_param == '1w':
-                range_seconds = 7 * 24 * 3600
-            elif range_param == '1m':
-                range_seconds = 30 * 24 * 3600
+                if range_param:
+                    range_seconds = 0
+                    if range_param == '1h':
+                        range_seconds = 3600
+                    elif range_param == '24h':
+                        range_seconds = 24 * 3600
+                    elif range_param == '1w':
+                        range_seconds = 7 * 24 * 3600
+                    elif range_param == '1m':
+                        range_seconds = 30 * 24 * 3600
 
-            # Get the current time in seconds since epoch
-            current_time = int(time.time())
+                    # Get the current time in seconds since epoch
+                    current_time = int(time.time())
 
-            # Calculate the start time based on the range
-            start_time = current_time - range_seconds
+                    # Calculate the start time based on the range
+                    start_time = current_time - range_seconds
 
-            cursor.execute(
-                "SELECT date_time, value FROM sensor_data WHERE node = ? AND date_time >= ? ORDER BY date_time ASC",
-                (device_param, start_time)
-            )
-        else:
-            cursor.execute(
-                "SELECT date_time, value FROM sensor_data WHERE node = ? ORDER BY date_time ASC",
-                (device_param,)
-            )
+                    select_query = "SELECT date_time, value FROM sensor_data WHERE node = %s AND date_time >= %s ORDER BY date_time ASC"
+                    cursor.execute(select_query, (device_param, start_time))
+                else:
+                    select_query = "SELECT date_time, value FROM sensor_data WHERE node = %s ORDER BY date_time ASC"
+                    cursor.execute(select_query, (device_param,))
 
-        data = cursor.fetchall()
-        cursor.close()
-        conn.close()
+                data = cursor.fetchall()
+                cursor.close()
 
-        # Format the data as a list of dictionaries
-        filtered_data = [
-            {"date_time": str(int(row[0]) * 1000), "value": row[1]} for row in data
-        ]
+                # Format the data as a list of dictionaries with properly formatted timestamps
+                filtered_data = [
+                    {"date_time": row[0].timestamp() * 1000, "value": row[1]} for row in data
+                ]
 
-        return jsonify(filtered_data)
+                return jsonify(filtered_data)
+        except Error as e:
+            print(e)
+            return jsonify([])
 
     # If no specific device is provided, return an empty list
     return jsonify([])
